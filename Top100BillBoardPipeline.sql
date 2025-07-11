@@ -7,261 +7,211 @@ CREATE OR REPLACE FILE FORMAT json_format
 TYPE = 'JSON'
 STRIP_OUTER_ARRAY = TRUE;  
 
-CREATE OR REPLACE STAGE artist_stage
-URL = 's3://pvdsongbucket/artists'
+CREATE OR REPLACE STAGE stage_top100
+URL = 's3://pvdsongbucket/top100tracks'
 STORAGE_INTEGRATION = my_s3_integration
   DIRECTORY = (
     ENABLE = true
     AUTO_REFRESH = true
   );
   
-CREATE OR REPLACE STAGE track_stage
-URL = 's3://pvdsongbucket/tracks'
-STORAGE_INTEGRATION = my_s3_integration
-  DIRECTORY = (
-    ENABLE = true
-    AUTO_REFRESH = true
-  );
 
-CREATE OR REPLACE TABLE "stage_artist" (
-    raw_data VARIANT,
-    load_date DATE DEFAULT CURRENT_DATE
-);
-CREATE OR REPLACE TABLE "stage_track" (
+CREATE OR REPLACE TABLE "top100_staging" (
     raw_data VARIANT,
     load_date DATE DEFAULT CURRENT_DATE
 );
 
-
-CREATE OR REPLACE TABLE "artist" (
-    artist_id STRING PRIMARY KEY,
-    name STRING,
-    genres ARRAY,
-    popularity NUMBER,
-    followers NUMBER,
-    external_url STRING,
-    metadata VARIANT, -- for keeping raw or extra data if needed
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-);
-CREATE OR REPLACE TABLE "track" (
-    track_id STRING PRIMARY KEY,
-    track_name STRING,
-    duration_ms NUMBER,
-    explicit BOOLEAN,
-    popularity NUMBER,
-    album_name STRING,
-    release_date DATE,
-    artist_id STRING REFERENCES "artist"(artist_id),
-    genres VARIANT,              -- list of genres assigned to this track
-    external_url STRING,
-    metadata VARIANT,            -- raw or extended track data
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+CREATE OR REPLACE TABLE "top100_latest" (
+    chart_date DATE,              
+    rank NUMBER,                   
+    track_id STRING REFERENCES "track"(track_id),
+    metadata VARIANT,              
+    load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (rank)
 );
 
-CREATE OR REPLACE PROCEDURE stored_copy_stage()
+CREATE OR REPLACE TABLE "top100_history" (
+    chart_date DATE,               
+    rank NUMBER,                   
+    track_id STRING REFERENCES "track"(track_id),
+    metadata VARIANT,             
+    load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (chart_date, rank)
+);
+
+
+CREATE OR REPLACE PROCEDURE stored_copy_stage_top100()
 RETURNS STRING
 LANGUAGE SQL
 AS
 $$
 BEGIN
-COPY INTO "stage_artist" (raw_data)
-FROM @artist_stage
+COPY INTO "top100_staging" (raw_data)
+FROM @stage_top100
 FILE_FORMAT = (TYPE = 'JSON');
-
-COPY INTO "stage_track" (raw_data)
-FROM @track_stage
-FILE_FORMAT = (TYPE = 'JSON');
-RETURN 'Copied data from artist_stage and track_stage successfully';
+RETURN 'Copied data from top100 stage successfully';
 END;
 
 $$;
-CREATE OR REPLACE PROCEDURE stored_proc_is_empty_stage()
+CREATE OR REPLACE PROCEDURE stored_proc_is_empty_stage_top100()
 RETURNS STRING
 LANGUAGE SQL
 AS
 $$
 BEGIN
-    LET i BOOLEAN DEFAULT IFF(EXISTS (SELECT * FROM "stage_artist"), TRUE, FALSE);
+    LET i BOOLEAN DEFAULT IFF(EXISTS (SELECT * FROM "top100_staging"), TRUE, FALSE);
     -- Check if any rows exist in the subquery
     IF (i = TRUE) THEN
-        EXECUTE TASK task_load_artist;
-    END IF;
-    LET j BOOLEAN DEFAULT IFF(EXISTS (SELECT * FROM "stage_track"), TRUE, FALSE);
-    -- Check if any rows exist in the subquery
-    IF (j = TRUE) THEN
-        EXECUTE TASK task_load_track;
+        EXECUTE TASK task_load_top100;
+        RETURN 'Task loading top100 runned';
     END IF;
     RETURN 'Error 1001: No data, stopped';
 END;
 $$;
 
-CREATE OR REPLACE PROCEDURE stored_load_artist_from_stage()
+CREATE OR REPLACE PROCEDURE load_top100_latest()
 RETURNS STRING
 LANGUAGE SQL
 AS
 $$
 BEGIN
-    MERGE INTO "artist" AS tgt
-    USING (
-        SELECT 
-            value:id::STRING AS artist_id,
-            value:artist::STRING AS name,
-            value:genres::ARRAY AS genres,
-            value:popularity::NUMBER AS popularity,
-            value:followers.total::NUMBER AS followers,
-            value:external_urls.spotify::STRING AS external_url,
-            value AS metadata
-        FROM "stage_artist",
-             LATERAL FLATTEN(input => raw_data)
-    ) AS src
-    ON tgt.artist_id = src.artist_id
-    WHEN MATCHED THEN UPDATE SET
-        name = src.name,
-        genres = src.genres,
-        popularity = src.popularity,
-        followers = src.followers,
-        external_url = src.external_url,
-        metadata = src.metadata,
-        updated_at = CURRENT_TIMESTAMP()
-    WHEN NOT MATCHED THEN INSERT (
-        artist_id, name, genres, popularity, followers, external_url, metadata, updated_at
-    ) VALUES (
-        src.artist_id, src.name, src.genres, src.popularity, src.followers, src.external_url, src.metadata, CURRENT_TIMESTAMP()
-    );
-
-    RETURN 'Artist data loaded successfully';
-END;
-$$;
-
-CREATE OR REPLACE PROCEDURE stored_load_tracks_from_stage()
-RETURNS STRING
-LANGUAGE SQL
-AS
-$$
-BEGIN
-MERGE INTO "track" AS tgt
+MERGE INTO "artist" AS tgt
 USING (
-    SELECT 
-        track.value:track_id::STRING AS track_id,
-        track.value:track_name::STRING AS track_name,
-        artist.value:artist::STRING AS artist_id,
-        track.value AS metadata
-    FROM "stage_track" AS s,
-         LATERAL FLATTEN(input => s.raw_data) AS artist,  -- artist level
-         LATERAL FLATTEN(input => artist.value:albums) AS album,  -- albums
-         LATERAL FLATTEN(input => album.value:tracks) AS track  -- tracks 
+  SELECT
+    MD5(LOWER(TRIM(value:"artist_name"::STRING))) AS artist_id,
+    INITCAP(TRIM(value:"artist_name"::STRING)) AS artist_name
+  FROM "top100_staging",
+       LATERAL FLATTEN(input => raw_data)
+  WHERE value:"artist_name" IS NOT NULL
 ) AS src
-ON tgt.track_id = src.track_id
+ON tgt.artist_id = src.artist_id
+WHEN NOT MATCHED THEN
+  INSERT (artist_id, name)
+  VALUES (src.artist_id, src.artist_name);
+  
+MERGE INTO "track" AS t
+USING (
+  SELECT
+    MD5(LOWER(TRIM(value:"artist_name"::STRING))) AS artist_id,
+    MD5(LOWER(TRIM(value:"track_name"::STRING)) || LOWER(TRIM(value:"artist_name"::STRING))) AS track_id,
+    value:"track_name"::STRING AS track_name,
+    value AS raw_data
+  FROM "top100_staging",
+       LATERAL FLATTEN(input => raw_data)
+  WHERE value:"track_name" IS NOT NULL
+) AS s
+ON t.track_id = s.track_id
+WHEN NOT MATCHED THEN
+  INSERT (track_id, track_name, artist_id)
+  VALUES (s.track_id, s.track_name, s.artist_id);
 
-WHEN MATCHED THEN UPDATE SET
-    track_name = src.track_name,
-    artist_id = src.artist_id,
-    metadata = src.metadata,
-    updated_at = CURRENT_TIMESTAMP()
+INSERT INTO "top100_history" (rank, track_id, chart_date)
+SELECT rank, track_id, chart_date
+FROM "top100_latest";
 
-WHEN NOT MATCHED THEN INSERT (
-    track_id, track_name, artist_id, metadata, updated_at
-) VALUES (
-    src.track_id, src.track_name, src.artist_id, src.metadata, CURRENT_TIMESTAMP()
-);
+DELETE FROM "top100_latest";
 
-RETURN 'Track data loaded successfully';
-
+INSERT INTO "top100_latest" (rank, track_id, chart_date)
+SELECT
+value:"rank"::INTEGER AS rank,
+MD5(LOWER(TRIM(value:"track_name"::STRING)) || LOWER(TRIM(value:"artist_name"::STRING))) AS track_id,
+value:"date"::DATE AS chart_date
+FROM "top100_staging",
+   LATERAL FLATTEN(input => "top100_staging".raw_data)
+WHERE rank IS NOT NULL;
+RETURN 'Top 100 latest table updated.';
 END;
 $$;
 
-CREATE OR REPLACE PROCEDURE stored_proc_clear_artist_stage()
+CREATE OR REPLACE PROCEDURE stored_proc_clear_top100_stage()
 RETURNS STRING
 LANGUAGE SQL
 AS
 $$
 BEGIN
-    DELETE FROM "stage_artist";
-    RETURN 'Completed transfer data';
-END;
-$$;
-CREATE OR REPLACE PROCEDURE stored_proc_clear_track_stage()
-RETURNS STRING
-LANGUAGE SQL
-AS
-$$
-BEGIN
-    DELETE FROM "stage_track";
+    DELETE FROM "top100_staging";
     RETURN 'Completed transfer data';
 END;
 $$;
 
-CREATE OR REPLACE TASK task_copy_stage
+CREATE OR REPLACE TASK task_copy_stage_top100
 WAREHOUSE = COMPUTE_WH
 SCHEDULE = '60 MINUTE'
-AS CALL stored_copy_stage();
+AS CALL stored_copy_stage_top100();
 
-CREATE OR REPLACE TASK task_is_empty_stage
+CREATE OR REPLACE TASK task_is_empty_stage_top100
 WAREHOUSE = COMPUTE_WH
 SCHEDULE = '30 MINUTE'
-AS CALL stored_proc_is_empty_stage();
+AS CALL stored_proc_is_empty_stage_top100();
 
-CREATE OR REPLACE TASK task_load_artist 
+CREATE OR REPLACE TASK task_load_top100
 WAREHOUSE = COMPUTE_WH
-AS CALL stored_load_artist_from_stage();
+AS CALL load_top100_latest();
 
-CREATE OR REPLACE TASK task_load_track
+CREATE OR REPLACE TASK task_clear_top100
 WAREHOUSE = COMPUTE_WH
-AS CALL stored_load_track_from_stage();
+AFTER task_load_top100
+AS CALL stored_proc_clear_top100_stage();
 
-CREATE OR REPLACE TASK task_clear_artist
-WAREHOUSE = COMPUTE_WH
-AFTER task_load_artist
-AS CALL stored_proc_clear_artist_stage();
+ALTER TASK task_copy_stage_top100 SUSPEND;
+ALTER TASK task_is_empty_stage_top100 SUSPEND;
+ALTER TASK task_load_top100 SUSPEND;
+ALTER TASK task_clear_top100 SUSPEND;
 
-CREATE OR REPLACE TASK task_clear_track
-WAREHOUSE = COMPUTE_WH
-AFTER task_load_track
-AS CALL stored_proc_clear_track_stage();
+ALTER TASK task_copy_stage_top100 RESUME;
+ALTER TASK task_clear_top100 RESUME;
+ALTER TASK task_is_empty_stage_top100 RESUME;
+-- call stored_copy_stage_top100();
+-- call stored_proc_is_empty_stage_top100();
+-- call load_top100_latest();
+-- call stored_proc_clear_top100_stage();
 
--- Stop and start task process (automatically)
-ALTER TASK task_copy_stage SUSPEND;
-ALTER TASK task_is_empty_stage SUSPEND;
-ALTER TASK task_load_artist SUSPEND;
-ALTER TASK task_load_track SUSPEND;
-ALTER TASK task_clear_artist SUSPEND;
-ALTER TASK task_clear_track SUSPEND;
-
-ALTER TASK task_copy_stage RESUME;
-ALTER TASK task_clear_artist RESUME;
-ALTER TASK task_clear_track RESUME;
--- ALTER TASK task_load_artist RESUME;
--- ALTER TASK task_load_track RESUME;
-ALTER TASK task_is_empty_stage RESUME;
-
--- For debugging:
--- DELETE FROM "artist";
--- CALL load_artist_data();
--- CALL load_tracks_from_stage();
-
--- Deplecated
-
--- CREATE OR REPLACE TABLE "user" (
---     user_id STRING PRIMARY KEY,
---     user_name STRING,
---     user_email STRING,
---     preferences VARIANT,         -- e.g., preferred genres, languages, etc.
---     metadata VARIANT,            -- optional nested user profile data
---     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
--- );
--- -- CREATE OR REPLACE TABLE "genre" (
---     genre_id STRING PRIMARY KEY,
---     name STRING,
---     description STRING,
---     related_genres VARIANT,      -- e.g., ["pop", "dance pop", "synthpop"]
---     metadata VARIANT,
---     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+-- CREATE OR REPLACE TABLE duplicate_table AS
+-- SELECT DISTINCT *
+-- FROM "artist"
+-- WHERE artist_id IN (
+--     SELECT artist_id
+--     FROM "artist"
+--     GROUP BY artist_id
+--     HAVING COUNT(artist_id) > 1
 -- );
 
--- CREATE OR REPLACE TABLE "user_favorite" (
---     user_id STRING REFERENCES "user"(user_id),
---     track_id STRING REFERENCES "track"(track_id),
---     liked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
---     context VARIANT,             -- e.g., source: 'playlist', mood: 'happy', location: 'NYC'
---     PRIMARY KEY (user_id, track_id)
+
+-- DELETE FROM "artist"
+-- WHERE artist_id
+-- IN (SELECT artist_id
+-- FROM duplicate_table);
+
+-- INSERT INTO "artist"
+-- SELECT *
+-- FROM duplicate_table;
+
+-- DROP TABLE duplicate_table;
+
+-- CREATE OR REPLACE TABLE duplicate_table AS
+-- SELECT DISTINCT *
+-- FROM "track"
+-- WHERE track_id IN (
+--     SELECT track_id
+--     FROM "track"
+--     GROUP BY track_id
+--     HAVING COUNT(track_id) > 1
 -- );
+
+
+-- DELETE FROM "track"
+-- WHERE track_id
+-- IN (SELECT track_id
+-- FROM duplicate_table);
+
+-- INSERT INTO "track"
+-- SELECT *
+-- FROM duplicate_table;
+
+-- DROP TABLE duplicate_table;
+
+-- INSERT INTO "top100_history" (rank, track_id, chart_date)
+-- SELECT rank, track_id, chart_date
+-- FROM "top100_latest";
+
+-- DELETE FROM "top100_latest";
