@@ -1,6 +1,6 @@
-# 📊 Data Warehouse Project
+## Data Warehouse Project
 
-This project demonstrates a basic data engineering ETL pipeline data using Cloud Service: Amazon Web Service (S3, Lambda) and Snowflake. It's ideal for learning or demonstrating how to integrate datalake in AWS with Snowflake.
+This project demonstrates a basic data engineering ETL pipeline data using Cloud Service: Amazon Web Service (S3, Lambda) and Snowflake. It's ideal for learning or demonstrating how to integrate datalake in AWS with Snowflake. 
 
 🎥 **Demo Video:** [Watch on Google Drive](https://drive.google.com/file/d/1zwRdB9LI7ZbzNgfERtLWB1b5r7XDozSX/view?usp=sharing)
 
@@ -10,7 +10,7 @@ This project demonstrates a basic data engineering ETL pipeline data using Cloud
 
 ### 1. `Top100BillBoardLambdaFunction.py`
 
-This script collect data from top 100 BillBoard and store them in S3.
+This script was implemented in Lambda Function Service in AWS, which collect data from top 100 BillBoard and store them in S3 Service.
 
 ---
 
