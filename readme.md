@@ -4,6 +4,7 @@ This project demonstrates a basic data engineering ETL pipeline data using Cloud
 
 🎥 **Demo Video:** [Watch on Google Drive](https://drive.google.com/file/d/1zwRdB9LI7ZbzNgfERtLWB1b5r7XDozSX/view?usp=sharing)
 
+The Cloud Service free trial has expired (1 month for Snowflake trial) hence no implement detail
 ---
 
 ## 📄 File Descriptions
