@@ -1,10 +1,10 @@
 ## Data Warehouse Project
 
 This project demonstrates a basic data engineering ETL pipeline data using Cloud Service: Amazon Web Service (S3, Lambda) and Snowflake. It's ideal for learning or demonstrating how to integrate datalake in AWS with Snowflake. 
+The Cloud Service free trial has expired (1 month for Snowflake trial) hence no implement prototype
 
 🎥 **Demo Video:** [Watch on Google Drive](https://drive.google.com/file/d/1zwRdB9LI7ZbzNgfERtLWB1b5r7XDozSX/view?usp=sharing)
 
-The Cloud Service free trial has expired (1 month for Snowflake trial) hence no implement detail
 ---
 
 ## 📄 File Descriptions
